@@ -13,6 +13,10 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
+      - name: Inject Icon
+        run: |
+          mkdir -p app/src/main/res/drawable
+          cp icon.png app/src/main/res/drawable/icon.png
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
         with:
