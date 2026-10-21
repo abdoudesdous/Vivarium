@@ -23,3 +23,11 @@
         </activity>
     </application>
 </manifest>
+<application
+        android:allowBackup="true"
+        android:hardwareAccelerated="true"
+        android:label="Vivarium"
+        android:icon="@drawable/icon"
+        android:supportsRtl="true"
+        android:usesCleartextTraffic="true"
+        android:theme="@style/Theme.AppCompat.DayNight.NoActionBar">
