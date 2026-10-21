@@ -6,8 +6,12 @@ import android.view.View
 import android.view.ViewGroup
 import android.webkit.*
 import android.widget.FrameLayout
+import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 
 class MainActivity : AppCompatActivity() {
 
@@ -15,6 +19,7 @@ class MainActivity : AppCompatActivity() {
     private var customView: View? = null
     private var customViewCallback: WebChromeClient.CustomViewCallback? = null
     private lateinit var fullscreenContainer: FrameLayout
+    private var backPressedTime: Long = 0
 
     private val TARGET_URL = "https://vivarium.su/"
 
@@ -23,6 +28,10 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
 
         AdBlocker.init(this)
+
+        // Setup controller to hide/show Android taskbar
+        val windowInsetsController = WindowCompat.getInsetsController(window, window.decorView)
+        windowInsetsController.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
 
         val rootLayout = FrameLayout(this)
         webView = WebView(this)
@@ -44,7 +53,7 @@ class MainActivity : AppCompatActivity() {
             databaseEnabled = true
             mediaPlaybackRequiresUserGesture = false
             javaScriptCanOpenWindowsAutomatically = false
-            setSupportMultipleWindows(false) // Kills pop-unders and new tab ads
+            setSupportMultipleWindows(false)
             mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
             userAgentString = userAgentString.replace("; wv", "")
         }
@@ -68,14 +77,8 @@ class MainActivity : AppCompatActivity() {
                 val url = request?.url ?: return false
                 val host = url.host?.lowercase() ?: return true
 
-                // Block external ad redirects, allow vivarium.su and legitimate CDNs/auth
-                if (host.contains("vivarium.su")) {
-                    return false
-                }
-                if (AdBlocker.isAd(url.toString())) {
-                    return true
-                }
-                // Block forced external browser redirects on clicks
+                if (host.contains("vivarium.su")) return false
+                if (AdBlocker.isAd(url.toString())) return true
                 return true
             }
 
@@ -85,7 +88,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Support fullscreen video playback
         webView.webChromeClient = object : WebChromeClient() {
             override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
                 if (customView != null) {
@@ -97,6 +99,9 @@ class MainActivity : AppCompatActivity() {
                 fullscreenContainer.addView(view)
                 fullscreenContainer.visibility = View.VISIBLE
                 webView.visibility = View.GONE
+                
+                // Hide Android Taskbar and Navigation Buttons
+                windowInsetsController.hide(WindowInsetsCompat.Type.systemBars())
             }
 
             override fun onHideCustomView() {
@@ -106,15 +111,27 @@ class MainActivity : AppCompatActivity() {
                 customView = null
                 customViewCallback?.onCustomViewHidden()
                 webView.visibility = View.VISIBLE
+                
+                // Bring Taskbar back when exiting fullscreen
+                windowInsetsController.show(WindowInsetsCompat.Type.systemBars())
             }
         }
 
+        // Smart Back Button Logic
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 when {
-                    customView != null -> webView.webChromeClient?.onHideCustomView()
-                    webView.canGoBack() -> webView.goBack()
-                    else -> finish()
+                    customView != null -> webView.webChromeClient?.onHideCustomView() // Exit fullscreen video
+                    webView.canGoBack() -> webView.goBack() // Go back one page on the website
+                    else -> {
+                        // Double tap to exit to desktop
+                        if (backPressedTime + 2000 > System.currentTimeMillis()) {
+                            finish()
+                        } else {
+                            Toast.makeText(this@MainActivity, "Press back again to exit", Toast.LENGTH_SHORT).show()
+                        }
+                        backPressedTime = System.currentTimeMillis()
+                    }
                 }
             }
         })
@@ -127,7 +144,7 @@ class MainActivity : AppCompatActivity() {
             (function() {
                 window.open = function() { return null; };
                 const style = document.createElement('style');
-                style.innerHTML = 
+                style.innerHTML = `
                     [class*="ads-"], [class*="-ads"], [id*="ads-"], [id*="-ads"],
                     [class*="ad-banner"], [id*="ad-banner"], [class*="rek-"],
                     iframe[src*="ads"], iframe[src*="doubleclick"], iframe[src*="yandex"],
@@ -137,7 +154,7 @@ class MainActivity : AppCompatActivity() {
                         visibility: hidden !important;
                         pointer-events: none !important;
                     }
-                ;
+                `;
                 document.head.appendChild(style);
             })();
         """.trimIndent()
