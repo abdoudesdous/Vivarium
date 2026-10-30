@@ -1,7 +1,9 @@
 package su.vivarium.app
 
 import android.annotation.SuppressLint
+import android.app.Dialog
 import android.os.Bundle
+import android.os.Message
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.*
@@ -20,6 +22,9 @@ class MainActivity : AppCompatActivity() {
     private var customViewCallback: WebChromeClient.CustomViewCallback? = null
     private lateinit var fullscreenContainer: FrameLayout
     private var backPressedTime: Long = 0
+    
+    // Dialog to hold the Google Sign-in popup
+    private var popupDialog: Dialog? = null
 
     private val TARGET_URL = "https://vivarium.su/"
 
@@ -29,7 +34,6 @@ class MainActivity : AppCompatActivity() {
 
         AdBlocker.init(this)
 
-        // Setup controller to hide/show Android taskbar
         val windowInsetsController = WindowCompat.getInsetsController(window, window.decorView)
         windowInsetsController.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
 
@@ -45,17 +49,22 @@ class MainActivity : AppCompatActivity() {
         setContentView(rootLayout)
 
         CookieManager.getInstance().setAcceptCookie(true)
-        CookieManager.getInstance().setAcceptThirdPartyCookies(webView, false)
+        // Third-party cookies must be true for Google Auth to pass tokens back to the main site
+        CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true) 
 
         webView.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
             databaseEnabled = true
             mediaPlaybackRequiresUserGesture = false
-            javaScriptCanOpenWindowsAutomatically = false
-            setSupportMultipleWindows(false)
             mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-            userAgentString = userAgentString.replace("; wv", "")
+            
+            // Allow Popups for Auth
+            javaScriptCanOpenWindowsAutomatically = true
+            setSupportMultipleWindows(true)
+            
+            // Strip WebView tags to bypass Google's 403 Disallowed_UserAgent error
+            userAgentString = userAgentString.replace("; wv", "").replace("Version/4.0 ", "")
         }
 
         webView.webViewClient = object : WebViewClient() {
@@ -77,7 +86,10 @@ class MainActivity : AppCompatActivity() {
                 val url = request?.url ?: return false
                 val host = url.host?.lowercase() ?: return true
 
+                // Allow Vivarium and Google Auth domains to load
                 if (host.contains("vivarium.su")) return false
+                if (host.contains("google.com") || host.contains("googleapis.com") || host.contains("gstatic.com")) return false
+                
                 if (AdBlocker.isAd(url.toString())) return true
                 return true
             }
@@ -89,6 +101,46 @@ class MainActivity : AppCompatActivity() {
         }
 
         webView.webChromeClient = object : WebChromeClient() {
+            
+            // --- HANDLE GOOGLE AUTH POPUPS ---
+            override fun onCreateWindow(view: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message?): Boolean {
+                val newWebView = WebView(this@MainActivity).apply {
+                    settings.javaScriptEnabled = true
+                    settings.javaScriptCanOpenWindowsAutomatically = true
+                    settings.setSupportMultipleWindows(true)
+                    settings.domStorageEnabled = true
+                    settings.userAgentString = view?.settings?.userAgentString
+                    
+                    webViewClient = object : WebViewClient() {
+                        override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                            view?.loadUrl(request?.url.toString())
+                            return true
+                        }
+                    }
+                    
+                    // Close the popup dialog when Google finishes the login
+                    webChromeClient = object : WebChromeClient() {
+                        override fun onCloseWindow(window: WebView?) {
+                            popupDialog?.dismiss()
+                            popupDialog = null
+                        }
+                    }
+                }
+
+                popupDialog = Dialog(this@MainActivity).apply {
+                    setContentView(newWebView)
+                    window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+                    show()
+                    setOnDismissListener { newWebView.destroy() }
+                }
+
+                val transport = resultMsg?.obj as WebView.WebViewTransport
+                transport.webView = newWebView
+                resultMsg?.sendToTarget()
+                return true
+            }
+
+            // --- FULLSCREEN VIDEO LOGIC ---
             override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
                 if (customView != null) {
                     callback?.onCustomViewHidden()
@@ -99,8 +151,6 @@ class MainActivity : AppCompatActivity() {
                 fullscreenContainer.addView(view)
                 fullscreenContainer.visibility = View.VISIBLE
                 webView.visibility = View.GONE
-                
-                // Hide Android Taskbar and Navigation Buttons
                 windowInsetsController.hide(WindowInsetsCompat.Type.systemBars())
             }
 
@@ -111,20 +161,20 @@ class MainActivity : AppCompatActivity() {
                 customView = null
                 customViewCallback?.onCustomViewHidden()
                 webView.visibility = View.VISIBLE
-                
-                // Bring Taskbar back when exiting fullscreen
                 windowInsetsController.show(WindowInsetsCompat.Type.systemBars())
             }
         }
 
-        // Smart Back Button Logic
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 when {
-                    customView != null -> webView.webChromeClient?.onHideCustomView() // Exit fullscreen video
-                    webView.canGoBack() -> webView.goBack() // Go back one page on the website
+                    popupDialog?.isShowing == true -> {
+                        popupDialog?.dismiss()
+                        popupDialog = null
+                    }
+                    customView != null -> webView.webChromeClient?.onHideCustomView()
+                    webView.canGoBack() -> webView.goBack()
                     else -> {
-                        // Double tap to exit to desktop
                         if (backPressedTime + 2000 > System.currentTimeMillis()) {
                             finish()
                         } else {
@@ -142,7 +192,6 @@ class MainActivity : AppCompatActivity() {
     private fun injectCosmeticAdBlocker(view: WebView?) {
         val js = """
             (function() {
-                window.open = function() { return null; };
                 const style = document.createElement('style');
                 style.innerHTML = `
                     [class*="ads-"], [class*="-ads"], [id*="ads-"], [id*="-ads"],
