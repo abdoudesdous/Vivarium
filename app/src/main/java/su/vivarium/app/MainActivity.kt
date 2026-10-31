@@ -92,7 +92,7 @@ class MainActivity : AppCompatActivity() {
             setSupportMultipleWindows(true)
             defaultTextEncodingName = "utf-8"
 
-// 1. Get the REAL Android User-Agent and clean it so Cloudflare trusts the fingerprint
+            // 1. Get the REAL Android User-Agent and clean it so Cloudflare trusts the fingerprint
             val baseUa = userAgentString.replace("; wv", "").replace("Version/4.0 ", "")
 
             if (isTvDevice) {
@@ -104,7 +104,8 @@ class MainActivity : AppCompatActivity() {
                 useWideViewPort = true
                 loadWithOverviewMode = true
             }
-            
+        }
+
         webView.webViewClient = object : WebViewClient() {
             override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                 val url = request?.url?.toString() ?: return super.shouldInterceptRequest(view, request)
@@ -234,7 +235,7 @@ class MainActivity : AppCompatActivity() {
         })
 
         if (isNetworkConnected()) webView.loadUrl(TARGET_URL) else showOfflineMenu()
-    }
+    } // This closing brace for onCreate() is what was missing in the error log!
 
     private fun handleExitToast() {
         if (backPressedTime + 2000 > System.currentTimeMillis()) {
