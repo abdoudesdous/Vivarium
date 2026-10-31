@@ -92,17 +92,19 @@ class MainActivity : AppCompatActivity() {
             setSupportMultipleWindows(true)
             defaultTextEncodingName = "utf-8"
 
+// 1. Get the REAL Android User-Agent and clean it so Cloudflare trusts the fingerprint
+            val baseUa = userAgentString.replace("; wv", "").replace("Version/4.0 ", "")
+
             if (isTvDevice) {
-                // Force a recognizable Smart TV User-Agent to trigger vivarium.su's native TV layout
-                userAgentString = "Mozilla/5.0 (SMART-TV; Linux; Tizen 6.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.5414.120 Safari/537.36"
+                // 2. Append TV flags to the real Android UA. 
+                // Vivarium sees "SMART-TV" and gives the TV layout; Cloudflare sees a valid Android device and auto-passes.
+                userAgentString = "$baseUa SMART-TV Android TV"
             } else {
-                // Standard mobile User-Agent for phones, stripped of WebView identifiers
-                userAgentString = userAgentString.replace("; wv", "").replace("Version/4.0 ", "")
+                userAgentString = baseUa
                 useWideViewPort = true
                 loadWithOverviewMode = true
             }
-        }
-
+            
         webView.webViewClient = object : WebViewClient() {
             override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                 val url = request?.url?.toString() ?: return super.shouldInterceptRequest(view, request)
