@@ -44,7 +44,6 @@ class MainActivity : AppCompatActivity() {
     private var backPressedTime: Long = 0
     private var popupDialog: Dialog? = null
     private var isTvDevice: Boolean = false
-    private var hasLoadError: Boolean = false
 
     private val TARGET_URL = "https://vivarium.su/"
 
@@ -60,14 +59,13 @@ class MainActivity : AppCompatActivity() {
         windowInsetsController.hide(WindowInsetsCompat.Type.systemBars())
 
         val rootLayout = FrameLayout(this).apply {
-            setBackgroundColor(Color.BLACK)
+            setBackgroundColor(Color.parseColor("#0D0D12"))
         }
 
         webView = WebView(this).apply {
-            setBackgroundColor(Color.BLACK)
+            setBackgroundColor(Color.parseColor("#0D0D12"))
             isFocusable = true
             isFocusableInTouchMode = true
-            setLayerType(View.LAYER_TYPE_HARDWARE, null)
         }
 
         fullscreenContainer = FrameLayout(this).apply {
@@ -117,23 +115,15 @@ class MainActivity : AppCompatActivity() {
             javaScriptCanOpenWindowsAutomatically = true
             setSupportMultipleWindows(true)
             defaultTextEncodingName = "utf-8"
+            useWideViewPort = true
+            loadWithOverviewMode = true
 
             if (isTvDevice) {
-                // Prevent tiny desktop scaling on TV & fix ultrawide aspect detection
-                useWideViewPort = false
-                loadWithOverviewMode = false
+                // Scale up text and icons on TV without breaking responsive viewport initialization
                 textZoom = 125
-            } else {
-                useWideViewPort = true
-                loadWithOverviewMode = true
             }
 
             userAgentString = userAgentString.replace("; wv", "").replace("Version/4.0 ", "")
-        }
-
-        if (isTvDevice) {
-            // Scale up UI elements on TV so icons and menus are larger and easy to read
-            webView.setInitialScale(130)
         }
 
         webView.webViewClient = object : WebViewClient() {
@@ -160,32 +150,26 @@ class MainActivity : AppCompatActivity() {
                 return true
             }
 
-            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                super.onPageStarted(view, url, favicon)
-                // Inject Arabic subtitle decoder early before the video player requests subtitle tracks
-                injectArabicSubtitleFixer(view)
-            }
-
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
-                if (!hasLoadError && url != "about:blank") {
-                    offlineOverlay.visibility = View.GONE
-                    webView.visibility = View.VISIBLE
-                }
-                injectArabicSubtitleFixer(view)
                 injectTvEngineAndAdBlocker(view)
             }
 
-            // Intercept Wi-Fi disconnect / network errors to prevent the white error page
             override fun onReceivedError(
                 view: WebView?,
                 request: WebResourceRequest?,
                 error: WebResourceError?
             ) {
+                // Only trigger the offline menu if the main page fails due to an actual network drop
                 if (request?.isForMainFrame == true) {
-                    hasLoadError = true
-                    view?.stopLoading()
-                    showOfflineMenu()
+                    val code = error?.errorCode ?: 0
+                    if (!isNetworkConnected() ||
+                        code == ERROR_HOST_LOOKUP ||
+                        code == ERROR_CONNECT ||
+                        code == ERROR_TIMEOUT
+                    ) {
+                        showOfflineMenu()
+                    }
                 }
             }
         }
@@ -257,13 +241,20 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Auto-recover when Wi-Fi reconnects
         val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         connectivityManager.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 runOnUiThread {
                     if (offlineOverlay.visibility == View.VISIBLE) {
                         retryConnection()
+                    }
+                }
+            }
+
+            override fun onLost(network: Network) {
+                runOnUiThread {
+                    if (!isNetworkConnected()) {
+                        showOfflineMenu()
                     }
                 }
             }
@@ -324,7 +315,6 @@ class MainActivity : AppCompatActivity() {
         return cm.activeNetwork != null
     }
 
-    // Native Dark-Mode Wi-Fi / Offline Menu Overlay
     private fun setupOfflineOverlay() {
         offlineOverlay = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -336,7 +326,7 @@ class MainActivity : AppCompatActivity() {
 
         val title = TextView(this).apply {
             text = "No Internet Connection"
-            textSize = 28f
+            textSize = 26f
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
             setPadding(0, 0, 0, 16)
@@ -344,7 +334,7 @@ class MainActivity : AppCompatActivity() {
 
         val subtitle = TextView(this).apply {
             text = "Check your Wi-Fi connection or reconnect below."
-            textSize = 16f
+            textSize = 15f
             setTextColor(Color.parseColor("#A0A0B0"))
             gravity = Gravity.CENTER
             setPadding(0, 0, 0, 56)
@@ -356,12 +346,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         fun styleTvButton(btn: Button, isPrimary: Boolean) {
-            btn.textSize = 16f
+            btn.textSize = 15f
             btn.setTextColor(Color.WHITE)
             btn.isAllCaps = false
             btn.isFocusable = true
             btn.isFocusableInTouchMode = true
-            btn.setPadding(56, 28, 56, 28)
+            btn.setPadding(48, 24, 48, 24)
 
             val normalBg = GradientDrawable().apply {
                 cornerRadius = 20f
@@ -370,14 +360,14 @@ class MainActivity : AppCompatActivity() {
             val focusedBg = GradientDrawable().apply {
                 cornerRadius = 20f
                 setColor(if (isPrimary) Color.parseColor("#FF2A70") else Color.parseColor("#383848"))
-                setStroke(5, Color.WHITE)
+                setStroke(4, Color.WHITE)
             }
 
             btn.background = normalBg
             btn.setOnFocusChangeListener { _, hasFocus ->
                 btn.background = if (hasFocus) focusedBg else normalBg
-                btn.scaleX = if (hasFocus) 1.08f else 1.0f
-                btn.scaleY = if (hasFocus) 1.08f else 1.0f
+                btn.scaleX = if (hasFocus) 1.06f else 1.0f
+                btn.scaleY = if (hasFocus) 1.06f else 1.0f
             }
         }
 
@@ -403,7 +393,7 @@ class MainActivity : AppCompatActivity() {
 
         val lpLeft = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
-        ).apply { marginEnd = 32 }
+        ).apply { marginEnd = 28 }
 
         val lpRight = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
@@ -419,7 +409,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun showOfflineMenu() {
         runOnUiThread {
-            webView.visibility = View.GONE
             offlineOverlay.visibility = View.VISIBLE
             wifiButton.requestFocus()
         }
@@ -427,7 +416,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun retryConnection() {
         if (isNetworkConnected()) {
-            hasLoadError = false
             offlineOverlay.visibility = View.GONE
             webView.visibility = View.VISIBLE
             val currentUrl = webView.url
@@ -444,12 +432,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        // Let Android handle D-Pad normally when the Offline Wi-Fi Menu or Google Sign-In dialog is open
         if (offlineOverlay.visibility == View.VISIBLE || popupDialog?.isShowing == true) {
             return super.dispatchKeyEvent(event)
         }
 
-        // Only hijack D-Pad on TV devices; leave phone touch/keys normal
         if (!isTvDevice) {
             return super.dispatchKeyEvent(event)
         }
@@ -495,66 +481,46 @@ class MainActivity : AppCompatActivity() {
         return super.dispatchKeyEvent(event)
     }
 
-    // Fixes Windows-1256 Arabic Subtitle Encoding (Replaces  diamonds with clean UTF-8 Arabic)
-    private fun injectArabicSubtitleFixer(view: WebView?) {
-        val js = """
-            (function() {
-                if (window.__arabicSubFixInstalled) return;
-                window.__arabicSubFixInstalled = true;
-
-                // Helper: Decode ArrayBuffer as UTF-8, or fall back to Windows-1256 (Arabic) if corrupted ()
-                function decodeSmartArabic(buffer) {
-                    const utf8Text = new TextDecoder('utf-8').decode(buffer);
-                    if (utf8Text.indexOf('\uFFFD') !== -1) {
-                        try {
-                            return new TextDecoder('windows-1256').decode(buffer);
-                        } catch (e) {
-                            return utf8Text;
-                        }
-                    }
-                    return utf8Text;
-                }
-
-                // 1. Intercept Response.prototype.text() for all fetched subtitle files (.srt / .vtt)
-                const origResponseText = Response.prototype.text;
-                Response.prototype.text = async function() {
-                    try {
-                        const clone = this.clone();
-                        const buf = await clone.arrayBuffer();
-                        return decodeSmartArabic(buf);
-                    } catch (e) {
-                        return origResponseText.call(this);
-                    }
-                };
-
-                // 2. Intercept FileReader.readAsText (in case the player parses Blob subtitles via FileReader)
-                const origReadAsText = FileReader.prototype.readAsText;
-                FileReader.prototype.readAsText = function(blob, label) {
-                    if (!label || label.toLowerCase() === 'utf-8' || label.toLowerCase() === 'utf8') {
-                        const self = this;
-                        blob.arrayBuffer().then(buf => {
-                            const fixedText = decodeSmartArabic(buf);
-                            const fixedBlob = new Blob([fixedText], { type: 'text/plain;charset=utf-8' });
-                            origReadAsText.call(self, fixedBlob, 'utf-8');
-                        }).catch(() => {
-                            origReadAsText.call(self, blob, label);
-                        });
-                        return;
-                    }
-                    return origReadAsText.call(this, blob, label);
-                };
-            })();
-        """.trimIndent()
-        view?.evaluateJavascript(js, null)
-    }
-
     private fun injectTvEngineAndAdBlocker(view: WebView?) {
+        val isTvFlag = if (isTvDevice) "true" else "false"
         val js = """
             (function() {
                 if (window.__tvEngineInstalled) return;
                 window.__tvEngineInstalled = true;
+                const IS_TV = $isTvFlag;
 
-                // 1. COSMETIC AD BLOCKER + TV FOCUS RING + CLEAN ARABIC SUBTITLE FONT/RTL
+                // 1. SAFE ARABIC SUBTITLE DECODER (Windows-1256 -> UTF-8 only when \uFFFD diamonds exist)
+                try {
+                    const origDecode = TextDecoder.prototype.decode;
+                    TextDecoder.prototype.decode = function(input, options) {
+                        const result = origDecode.call(this, input, options);
+                        if (result && result.indexOf('\uFFFD') !== -1 && input) {
+                            try {
+                                return new TextDecoder('windows-1256').decode(input);
+                            } catch (e) {}
+                        }
+                        return result;
+                    };
+
+                    const origRespText = Response.prototype.text;
+                    Response.prototype.text = async function() {
+                        const url = (this.url || '').toLowerCase();
+                        // Only inspect subtitle responses or text containing replacement diamonds
+                        if (url.includes('.srt') || url.includes('.vtt') || url.includes('sub') || url.includes('caption')) {
+                            try {
+                                const buf = await this.clone().arrayBuffer();
+                                const utf8 = new TextDecoder('utf-8').decode(buf);
+                                if (utf8.indexOf('\uFFFD') !== -1) {
+                                    return new TextDecoder('windows-1256').decode(buf);
+                                }
+                                return utf8;
+                            } catch (e) {}
+                        }
+                        return origRespText.call(this);
+                    };
+                } catch (e) {}
+
+                // 2. COSMETIC AD BLOCKER + TV UI ZOOM & FOCUS RING
                 const style = document.createElement('style');
                 style.innerHTML = `
                     [class*="ads-"], [class*="-ads"], [id*="ads-"], [id*="-ads"],
@@ -568,17 +534,20 @@ class MainActivity : AppCompatActivity() {
                         outline-offset: 2px !important;
                     }
                     video::cue {
-                        font-family: 'Cairo', 'Noto Sans Arabic', 'Tahoma', sans-serif !important;
+                        font-family: 'Tahoma', 'Arial', sans-serif !important;
                         unicode-bidi: plaintext !important;
                     }
-                    [data-player="true"] * {
-                        unicode-bidi: plaintext;
+                ` + (IS_TV ? `
+                    /* Make player control icons and menus bigger on TV */
+                    [data-player="true"] button svg {
+                        transform: scale(1.28) !important;
                     }
-                `;
+                ` : '');
                 document.head.appendChild(style);
 
-                // 2. KEEP BURYING THE "CONFIRM YOU'RE NOT A ROBOT" QR SCAM OVERLAY
+                // 3. KEEP BURYING THE "CONFIRM YOU'RE NOT A ROBOT" QR OVERLAY
                 function nukeRobotOverlay() {
+                    if (!document.body) return;
                     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
                     let node;
                     while ((node = walker.nextNode())) {
@@ -596,15 +565,26 @@ class MainActivity : AppCompatActivity() {
                             if (node.parentElement) node.parentElement.remove();
                         }
                     }
-                    document.querySelectorAll('div, iframe, a').forEach(el => {
-                        if (el.hasAttribute('data-player') || el.closest('[data-player="true"]')) return;
-                        const z = parseInt(el.style.zIndex || 0, 10);
-                        if (z > 99999 && !el.classList.contains('__tv-focused')) {
-                            el.remove();
-                        }
-                    });
                 }
-                setInterval(nukeRobotOverlay, 600);
+                setInterval(nukeRobotOverlay, 700);
+
+                // 4. DOM SUBTITLE FIXER (Re-checks active video TextTracks for corrupted Arabic cues)
+                setInterval(function() {
+                    const video = document.querySelector('video');
+                    if (video && video.textTracks) {
+                        for (let i = 0; i < video.textTracks.length; i++) {
+                            const track = video.textTracks[i];
+                            if (track.cues) {
+                                for (let j = 0; j < track.cues.length; j++) {
+                                    const cue = track.cues[j];
+                                    if (cue.text && cue.text.indexOf('\uFFFD') !== -1 && !cue.__fixed) {
+                                        cue.__fixed = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }, 1000);
 
                 let currentFocus = null;
                 let playerControlsVisible = false;
@@ -663,14 +643,16 @@ class MainActivity : AppCompatActivity() {
                     }, 4000);
                 }
 
-                document.addEventListener('play', function(e) {
-                    if (e.target && e.target.tagName === 'VIDEO') {
-                        const player = document.querySelector('[data-player="true"]');
-                        if (player) {
-                            player.style.cssText = 'position:fixed !important; top:0 !important; left:0 !important; width:100vw !important; height:100vh !important; z-index:99999 !important;';
+                if (IS_TV) {
+                    document.addEventListener('play', function(e) {
+                        if (e.target && e.target.tagName === 'VIDEO') {
+                            const player = document.querySelector('[data-player="true"]');
+                            if (player) {
+                                player.style.cssText = 'position:fixed !important; top:0 !important; left:0 !important; width:100vw !important; height:100vh !important; z-index:99999 !important;';
+                            }
                         }
-                    }
-                }, true);
+                    }, true);
+                }
 
                 function moveFocus(direction) {
                     const items = getFocusableElements();
