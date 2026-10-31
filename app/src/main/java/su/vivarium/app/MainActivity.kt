@@ -2,15 +2,28 @@ package su.vivarium.app
 
 import android.annotation.SuppressLint
 import android.app.Dialog
+import android.app.UiModeManager
 import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.res.Configuration
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
+import android.net.ConnectivityManager
+import android.net.Network
 import android.os.Bundle
 import android.os.Message
+import android.provider.Settings
+import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
 import android.webkit.*
+import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
@@ -24,8 +37,14 @@ class MainActivity : AppCompatActivity() {
     private var customView: View? = null
     private var customViewCallback: WebChromeClient.CustomViewCallback? = null
     private lateinit var fullscreenContainer: FrameLayout
+    private lateinit var offlineOverlay: LinearLayout
+    private lateinit var wifiButton: Button
+    private lateinit var retryButton: Button
+
     private var backPressedTime: Long = 0
     private var popupDialog: Dialog? = null
+    private var isTvDevice: Boolean = false
+    private var hasLoadError: Boolean = false
 
     private val TARGET_URL = "https://vivarium.su/"
 
@@ -34,21 +53,35 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
 
         AdBlocker.init(this)
+        isTvDevice = checkIsTelevision()
 
         val windowInsetsController = WindowCompat.getInsetsController(window, window.decorView)
         windowInsetsController.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        windowInsetsController.hide(WindowInsetsCompat.Type.systemBars())
 
-        val rootLayout = FrameLayout(this)
+        val rootLayout = FrameLayout(this).apply {
+            setBackgroundColor(Color.BLACK)
+        }
+
         webView = WebView(this).apply {
+            setBackgroundColor(Color.BLACK)
             isFocusable = true
             isFocusableInTouchMode = true
             setLayerType(View.LAYER_TYPE_HARDWARE, null)
         }
-        fullscreenContainer = FrameLayout(this).apply { visibility = View.GONE }
+
+        fullscreenContainer = FrameLayout(this).apply {
+            setBackgroundColor(Color.BLACK)
+            visibility = View.GONE
+        }
+
+        setupOfflineOverlay()
 
         rootLayout.addView(webView, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         rootLayout.addView(fullscreenContainer, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        rootLayout.addView(offlineOverlay, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
         setContentView(rootLayout)
@@ -56,7 +89,6 @@ class MainActivity : AppCompatActivity() {
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
 
-        // Native Bridge to force Android TV Keyboard to open/close
         webView.addJavascriptInterface(object {
             @JavascriptInterface
             fun showKeyboard() {
@@ -84,9 +116,24 @@ class MainActivity : AppCompatActivity() {
             mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
             javaScriptCanOpenWindowsAutomatically = true
             setSupportMultipleWindows(true)
-            useWideViewPort = true
-            loadWithOverviewMode = true
+            defaultTextEncodingName = "utf-8"
+
+            if (isTvDevice) {
+                // Prevent tiny desktop scaling on TV & fix ultrawide aspect detection
+                useWideViewPort = false
+                loadWithOverviewMode = false
+                textZoom = 125
+            } else {
+                useWideViewPort = true
+                loadWithOverviewMode = true
+            }
+
             userAgentString = userAgentString.replace("; wv", "").replace("Version/4.0 ", "")
+        }
+
+        if (isTvDevice) {
+            // Scale up UI elements on TV so icons and menus are larger and easy to read
+            webView.setInitialScale(130)
         }
 
         webView.webViewClient = object : WebViewClient() {
@@ -110,12 +157,36 @@ class MainActivity : AppCompatActivity() {
 
                 if (host.contains("vivarium.su")) return false
                 if (host.contains("google.com") || host.contains("googleapis.com") || host.contains("gstatic.com")) return false
-                return true // Block all external ad redirects
+                return true
+            }
+
+            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                super.onPageStarted(view, url, favicon)
+                // Inject Arabic subtitle decoder early before the video player requests subtitle tracks
+                injectArabicSubtitleFixer(view)
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
+                if (!hasLoadError && url != "about:blank") {
+                    offlineOverlay.visibility = View.GONE
+                    webView.visibility = View.VISIBLE
+                }
+                injectArabicSubtitleFixer(view)
                 injectTvEngineAndAdBlocker(view)
+            }
+
+            // Intercept Wi-Fi disconnect / network errors to prevent the white error page
+            override fun onReceivedError(
+                view: WebView?,
+                request: WebResourceRequest?,
+                error: WebResourceError?
+            ) {
+                if (request?.isForMainFrame == true) {
+                    hasLoadError = true
+                    view?.stopLoading()
+                    showOfflineMenu()
+                }
             }
         }
 
@@ -132,7 +203,6 @@ class MainActivity : AppCompatActivity() {
                         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                             val url = request?.url?.toString() ?: return true
                             val host = request.url?.host?.lowercase() ?: return true
-                            // Only allow Google Login inside popup windows; kill ad popups immediately
                             if (host.contains("google.com") || host.contains("googleapis.com") || host.contains("vivarium.su")) {
                                 view?.loadUrl(url)
                                 return true
@@ -183,12 +253,33 @@ class MainActivity : AppCompatActivity() {
                 customView = null
                 customViewCallback?.onCustomViewHidden()
                 webView.visibility = View.VISIBLE
-                windowInsetsController.show(WindowInsetsCompat.Type.systemBars())
+                windowInsetsController.hide(WindowInsetsCompat.Type.systemBars())
             }
         }
 
+        // Auto-recover when Wi-Fi reconnects
+        val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        connectivityManager.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                runOnUiThread {
+                    if (offlineOverlay.visibility == View.VISIBLE) {
+                        retryConnection()
+                    }
+                }
+            }
+        })
+
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
+                if (offlineOverlay.visibility == View.VISIBLE) {
+                    if (backPressedTime + 2000 > System.currentTimeMillis()) {
+                        finish()
+                    } else {
+                        Toast.makeText(this@MainActivity, "Press back again to exit", Toast.LENGTH_SHORT).show()
+                    }
+                    backPressedTime = System.currentTimeMillis()
+                    return
+                }
                 if (popupDialog?.isShowing == true) {
                     popupDialog?.dismiss()
                     popupDialog = null
@@ -214,11 +305,152 @@ class MainActivity : AppCompatActivity() {
             }
         })
 
-        webView.loadUrl(TARGET_URL)
+        if (isNetworkConnected()) {
+            webView.loadUrl(TARGET_URL)
+        } else {
+            showOfflineMenu()
+        }
+    }
+
+    private fun checkIsTelevision(): Boolean {
+        val uiModeManager = getSystemService(Context.UI_MODE_SERVICE) as UiModeManager
+        return uiModeManager.currentModeType == Configuration.UI_MODE_TYPE_TELEVISION ||
+                packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK) ||
+                !packageManager.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN)
+    }
+
+    private fun isNetworkConnected(): Boolean {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        return cm.activeNetwork != null
+    }
+
+    // Native Dark-Mode Wi-Fi / Offline Menu Overlay
+    private fun setupOfflineOverlay() {
+        offlineOverlay = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setBackgroundColor(Color.parseColor("#0D0D12"))
+            visibility = View.GONE
+            setPadding(64, 64, 64, 64)
+        }
+
+        val title = TextView(this).apply {
+            text = "No Internet Connection"
+            textSize = 28f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, 16)
+        }
+
+        val subtitle = TextView(this).apply {
+            text = "Check your Wi-Fi connection or reconnect below."
+            textSize = 16f
+            setTextColor(Color.parseColor("#A0A0B0"))
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, 56)
+        }
+
+        val btnRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+
+        fun styleTvButton(btn: Button, isPrimary: Boolean) {
+            btn.textSize = 16f
+            btn.setTextColor(Color.WHITE)
+            btn.isAllCaps = false
+            btn.isFocusable = true
+            btn.isFocusableInTouchMode = true
+            btn.setPadding(56, 28, 56, 28)
+
+            val normalBg = GradientDrawable().apply {
+                cornerRadius = 20f
+                setColor(if (isPrimary) Color.parseColor("#FF0055") else Color.parseColor("#252530"))
+            }
+            val focusedBg = GradientDrawable().apply {
+                cornerRadius = 20f
+                setColor(if (isPrimary) Color.parseColor("#FF2A70") else Color.parseColor("#383848"))
+                setStroke(5, Color.WHITE)
+            }
+
+            btn.background = normalBg
+            btn.setOnFocusChangeListener { _, hasFocus ->
+                btn.background = if (hasFocus) focusedBg else normalBg
+                btn.scaleX = if (hasFocus) 1.08f else 1.0f
+                btn.scaleY = if (hasFocus) 1.08f else 1.0f
+            }
+        }
+
+        wifiButton = Button(this).apply {
+            text = "Wi-Fi Settings"
+            styleTvButton(this, true)
+            setOnClickListener {
+                try {
+                    startActivity(Intent(Settings.ACTION_WIFI_SETTINGS))
+                } catch (e: Exception) {
+                    startActivity(Intent(Settings.ACTION_SETTINGS))
+                }
+            }
+        }
+
+        retryButton = Button(this).apply {
+            text = "Retry Connection"
+            styleTvButton(this, false)
+            setOnClickListener {
+                retryConnection()
+            }
+        }
+
+        val lpLeft = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { marginEnd = 32 }
+
+        val lpRight = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        )
+
+        btnRow.addView(wifiButton, lpLeft)
+        btnRow.addView(retryButton, lpRight)
+
+        offlineOverlay.addView(title)
+        offlineOverlay.addView(subtitle)
+        offlineOverlay.addView(btnRow)
+    }
+
+    private fun showOfflineMenu() {
+        runOnUiThread {
+            webView.visibility = View.GONE
+            offlineOverlay.visibility = View.VISIBLE
+            wifiButton.requestFocus()
+        }
+    }
+
+    private fun retryConnection() {
+        if (isNetworkConnected()) {
+            hasLoadError = false
+            offlineOverlay.visibility = View.GONE
+            webView.visibility = View.VISIBLE
+            val currentUrl = webView.url
+            if (currentUrl.isNullOrEmpty() || currentUrl == "about:blank") {
+                webView.loadUrl(TARGET_URL)
+            } else {
+                webView.reload()
+            }
+            webView.requestFocus()
+        } else {
+            Toast.makeText(this, "Still offline. Please check Wi-Fi.", Toast.LENGTH_SHORT).show()
+            wifiButton.requestFocus()
+        }
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (popupDialog?.isShowing == true) {
+        // Let Android handle D-Pad normally when the Offline Wi-Fi Menu or Google Sign-In dialog is open
+        if (offlineOverlay.visibility == View.VISIBLE || popupDialog?.isShowing == true) {
+            return super.dispatchKeyEvent(event)
+        }
+
+        // Only hijack D-Pad on TV devices; leave phone touch/keys normal
+        if (!isTvDevice) {
             return super.dispatchKeyEvent(event)
         }
 
@@ -263,13 +495,66 @@ class MainActivity : AppCompatActivity() {
         return super.dispatchKeyEvent(event)
     }
 
+    // Fixes Windows-1256 Arabic Subtitle Encoding (Replaces  diamonds with clean UTF-8 Arabic)
+    private fun injectArabicSubtitleFixer(view: WebView?) {
+        val js = """
+            (function() {
+                if (window.__arabicSubFixInstalled) return;
+                window.__arabicSubFixInstalled = true;
+
+                // Helper: Decode ArrayBuffer as UTF-8, or fall back to Windows-1256 (Arabic) if corrupted ()
+                function decodeSmartArabic(buffer) {
+                    const utf8Text = new TextDecoder('utf-8').decode(buffer);
+                    if (utf8Text.indexOf('\uFFFD') !== -1) {
+                        try {
+                            return new TextDecoder('windows-1256').decode(buffer);
+                        } catch (e) {
+                            return utf8Text;
+                        }
+                    }
+                    return utf8Text;
+                }
+
+                // 1. Intercept Response.prototype.text() for all fetched subtitle files (.srt / .vtt)
+                const origResponseText = Response.prototype.text;
+                Response.prototype.text = async function() {
+                    try {
+                        const clone = this.clone();
+                        const buf = await clone.arrayBuffer();
+                        return decodeSmartArabic(buf);
+                    } catch (e) {
+                        return origResponseText.call(this);
+                    }
+                };
+
+                // 2. Intercept FileReader.readAsText (in case the player parses Blob subtitles via FileReader)
+                const origReadAsText = FileReader.prototype.readAsText;
+                FileReader.prototype.readAsText = function(blob, label) {
+                    if (!label || label.toLowerCase() === 'utf-8' || label.toLowerCase() === 'utf8') {
+                        const self = this;
+                        blob.arrayBuffer().then(buf => {
+                            const fixedText = decodeSmartArabic(buf);
+                            const fixedBlob = new Blob([fixedText], { type: 'text/plain;charset=utf-8' });
+                            origReadAsText.call(self, fixedBlob, 'utf-8');
+                        }).catch(() => {
+                            origReadAsText.call(self, blob, label);
+                        });
+                        return;
+                    }
+                    return origReadAsText.call(this, blob, label);
+                };
+            })();
+        """.trimIndent()
+        view?.evaluateJavascript(js, null)
+    }
+
     private fun injectTvEngineAndAdBlocker(view: WebView?) {
         val js = """
             (function() {
                 if (window.__tvEngineInstalled) return;
                 window.__tvEngineInstalled = true;
 
-                // 1. ULTRA-LIGHTWEIGHT CSS FOCUS RING (Zero GPU Lag)
+                // 1. COSMETIC AD BLOCKER + TV FOCUS RING + CLEAN ARABIC SUBTITLE FONT/RTL
                 const style = document.createElement('style');
                 style.innerHTML = `
                     [class*="ads-"], [class*="-ads"], [id*="ads-"], [id*="-ads"],
@@ -282,19 +567,24 @@ class MainActivity : AppCompatActivity() {
                         outline: 3px solid #ff0055 !important;
                         outline-offset: 2px !important;
                     }
+                    video::cue {
+                        font-family: 'Cairo', 'Noto Sans Arabic', 'Tahoma', sans-serif !important;
+                        unicode-bidi: plaintext !important;
+                    }
+                    [data-player="true"] * {
+                        unicode-bidi: plaintext;
+                    }
                 `;
                 document.head.appendChild(style);
 
-                // 2. AUTO-KILL "CONFIRM YOU'RE NOT A ROBOT" QR SCAM OVERLAY
+                // 2. KEEP BURYING THE "CONFIRM YOU'RE NOT A ROBOT" QR SCAM OVERLAY
                 function nukeRobotOverlay() {
-                    // Kill any element containing the fake robot text
                     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
                     let node;
                     while ((node = walker.nextNode())) {
                         const txt = node.nodeValue ? node.nodeValue.toLowerCase() : '';
                         if (txt.includes("confirm you're not a robot") || txt.includes("confirm you are not a robot")) {
                             let container = node.parentElement;
-                            // Walk up to find the fixed/absolute overlay wrapper and destroy it
                             while (container && container !== document.body) {
                                 const pos = window.getComputedStyle(container).position;
                                 if (pos === 'fixed' || pos === 'absolute' || container.style.zIndex > 100) {
@@ -306,7 +596,6 @@ class MainActivity : AppCompatActivity() {
                             if (node.parentElement) node.parentElement.remove();
                         }
                     }
-                    // Also remove transparent click-hijack overlays sitting on top of the page
                     document.querySelectorAll('div, iframe, a').forEach(el => {
                         if (el.hasAttribute('data-player') || el.closest('[data-player="true"]')) return;
                         const z = parseInt(el.style.zIndex || 0, 10);
@@ -321,7 +610,6 @@ class MainActivity : AppCompatActivity() {
                 let playerControlsVisible = false;
                 let hideControlsTimer = null;
 
-                // Fast visibility check without calling expensive getComputedStyle on every node
                 function isFastVisible(el) {
                     if (!el || (!el.offsetWidth && !el.offsetHeight && el.getClientRects().length === 0)) return false;
                     const rect = el.getBoundingClientRect();
@@ -331,7 +619,7 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 function getFocusableElements() {
-                    const selector = 'a[href], button:not([disabled]), input:not([disabled]), [role="button"], [role="slider"], [tabindex="0"]';
+                    const selector = 'a[href], button:not([disabled]), input:not([disabled]), [role="button"], [role="slider"], [role="menuitem"], [role="option"], [tabindex="0"]';
                     const raw = document.querySelectorAll(selector);
                     const result = [];
                     for (let i = 0; i < raw.length; i++) {
@@ -355,7 +643,6 @@ class MainActivity : AppCompatActivity() {
                     currentFocus.classList.add('__tv-focused');
                     currentFocus.focus({ preventScroll: true });
 
-                    // Instant scroll only if element is near screen edges (eliminates smooth-scroll lag)
                     const rect = currentFocus.getBoundingClientRect();
                     if (rect.top < 80 || rect.bottom > window.innerHeight - 80) {
                         window.scrollBy(0, rect.top - (window.innerHeight / 2) + (rect.height / 2));
@@ -494,7 +781,6 @@ class MainActivity : AppCompatActivity() {
                         moveFocus(key);
                     } else if (key === 'OK') {
                         if (currentFocus && isFastVisible(currentFocus)) {
-                            // If it's the Search input, force open the native Android TV keyboard!
                             if (currentFocus.tagName === 'INPUT' || currentFocus.getAttribute('role') === 'searchbox') {
                                 currentFocus.focus();
                                 currentFocus.click();
